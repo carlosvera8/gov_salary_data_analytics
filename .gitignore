@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Downloaded/processed data (re-pull with python main.py)
+data/raw/
+data/processed/*
+!data/processed/census_clean.parquet
