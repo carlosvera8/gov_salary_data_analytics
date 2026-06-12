@@ -9,6 +9,8 @@ import plotly.graph_objects as go
 from pathlib import Path
 
 PROCESSED_DIR = Path("data/processed")
+QUINTILE_ORDER = ["Bottom 20%", "Lower-Middle", "Middle", "Upper-Middle", "Top 20%"]
+FAMSIZE_ORDER  = ["1", "2", "3", "4", "5", "6", "7+"]
 
 # ── Label maps ────────────────────────────────────────────────────────────────
 
@@ -52,6 +54,12 @@ st.set_page_config(
 @st.cache_data
 def load_census() -> pd.DataFrame | None:
     p = PROCESSED_DIR / "census_clean.parquet"
+    return pd.read_parquet(p) if p.exists() else None
+
+
+@st.cache_data
+def load_gss() -> pd.DataFrame | None:
+    p = PROCESSED_DIR / "gss_clean.parquet"
     return pd.read_parquet(p) if p.exists() else None
 
 
@@ -125,8 +133,9 @@ def main():
         metros   = c[c["geography"] == "Metro"]
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    t_overview, t_gender, t_race, t_family, t_industry, t_occ, t_metro = st.tabs([
-        "Overview", "Gender Gap", "Race & Ethnicity", "Family Size", "By Industry", "By Occupation", "Metro Areas"
+    t_overview, t_gender, t_race, t_family, t_industry, t_occ, t_metro, t_happy = st.tabs([
+        "Overview", "Gender Gap", "Race & Ethnicity", "Family Size",
+        "By Industry", "By Occupation", "Metro Areas", "Happiness"
     ])
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -618,6 +627,277 @@ def main():
                 )
                 fig2.update_layout(yaxis_tickformat="$,.0f", hovermode="x unified")
                 st.plotly_chart(fig2, width='stretch')
+
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 8 — Happiness (GSS)
+    # ─────────────────────────────────────────────────────────────────────────
+    with t_happy:
+        gss = load_gss()
+
+        if gss is None:
+            st.info("Happiness data not yet loaded.")
+            st.markdown(
+                "**To enable this tab:**\n\n"
+                "1. Go to [gssdataexplorer.norc.org](https://gssdataexplorer.norc.org) "
+                "and create a free account\n"
+                "2. Click **Extract Data → Select Variables** and add: "
+                "`YEAR`, `HAPPY`, `REALINC`, `FAMSIZE`, `SEX`, `RACE`, `CHILDS`\n"
+                "3. Select all years, download as CSV\n"
+                "4. Save the file into `data/raw/gss/`\n"
+                "5. Run: `python main.py --gss-only`\n"
+                "6. Refresh this page"
+            )
+            st.stop()
+
+        st.caption(
+            "Source: **General Social Survey** (NORC at University of Chicago), 1972–2022. "
+            "Happiness question: *'Taken all together, how would you say things are these days — "
+            "very happy, pretty happy, or not too happy?'*"
+        )
+
+        # Filter to selected year range
+        g = gss[(gss["year"] >= year_range[0]) & (gss["year"] <= year_range[1])].copy()
+
+        # ── KPI row ───────────────────────────────────────────────────────────
+        total = len(g)
+        pct_very   = g["is_very_happy"].mean() * 100 if total > 0 else 0
+        pct_pretty = (g["happy"] == 2).mean() * 100  if total > 0 else 0
+        pct_not    = (g["happy"] == 3).mean() * 100  if total > 0 else 0
+
+        # Income premium: % very happy in top vs bottom quintile
+        income_grp = g[g["income_quintile"].notna()]
+        top_happy = income_grp[income_grp["income_quintile"] == "Top 20%"]["is_very_happy"].mean() * 100
+        bot_happy = income_grp[income_grp["income_quintile"] == "Bottom 20%"]["is_very_happy"].mean() * 100
+        premium = top_happy - bot_happy
+
+        # Happiest household size
+        if "famsize_grp" in g.columns:
+            fam_happy = (
+                g[g["famsize_grp"].notna()]
+                .groupby("famsize_grp", observed=True)["is_very_happy"]
+                .mean()
+            )
+            happiest_size = fam_happy.idxmax() if not fam_happy.empty else "N/A"
+        else:
+            happiest_size = "N/A"
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Very Happy", f"{pct_very:.1f}%")
+        k2.metric("Pretty Happy", f"{pct_pretty:.1f}%")
+        k3.metric("Not Too Happy", f"{pct_not:.1f}%")
+        k4.metric("Income Happiness Premium", f"+{premium:.1f}pp", help="Top 20% vs Bottom 20% income, % very happy")
+
+        st.divider()
+
+        # ── Section 1: Does Money Buy Happiness? ─────────────────────────────
+        st.subheader("Does Money Buy Happiness?")
+        st.caption(
+            "Income measured in 2023 dollars (converted from GSS constant 1986$). "
+            "Each line shows a different decade of survey responses."
+        )
+
+        if "income_quintile" in g.columns and "decade" in g.columns:
+            inc_dec = (
+                g[g["income_quintile"].notna() & g["decade"].notna()]
+                .groupby(["decade", "income_quintile"], observed=True)["is_very_happy"]
+                .mean()
+                .mul(100)
+                .reset_index()
+                .rename(columns={"is_very_happy": "% Very Happy", "income_quintile": "Income Quintile"})
+            )
+            inc_dec["Income Quintile"] = pd.Categorical(
+                inc_dec["Income Quintile"], categories=QUINTILE_ORDER, ordered=True
+            )
+            inc_dec = inc_dec.sort_values("Income Quintile")
+
+            fig = px.line(
+                inc_dec, x="Income Quintile", y="% Very Happy", color="decade",
+                markers=True,
+                title="% Reporting 'Very Happy' by Income Quintile and Decade",
+                labels={"decade": "Decade", "% Very Happy": "% Very Happy"},
+                category_orders={"Income Quintile": QUINTILE_ORDER},
+            )
+            fig.update_layout(yaxis_ticksuffix="%", hovermode="x unified", yaxis_range=[0, 70])
+            st.plotly_chart(fig, width='stretch')
+
+            # Latest-period bar for clean at-a-glance view
+            latest_inc = (
+                g[g["income_quintile"].notna() & (g["year"] >= g["year"].max() - 4)]
+                .groupby("income_quintile", observed=True)["is_very_happy"]
+                .agg(["mean", "count"])
+                .reset_index()
+            )
+            latest_inc.columns = ["Income Quintile", "pct_very_happy", "n"]
+            latest_inc["% Very Happy"] = (latest_inc["pct_very_happy"] * 100).round(1)
+            latest_inc["Income Quintile"] = pd.Categorical(
+                latest_inc["Income Quintile"], categories=QUINTILE_ORDER, ordered=True
+            )
+            latest_inc = latest_inc.sort_values("Income Quintile")
+
+            fig2 = px.bar(
+                latest_inc, x="Income Quintile", y="% Very Happy",
+                text_auto=".1f",
+                color="% Very Happy", color_continuous_scale="RdYlGn",
+                title=f"% Very Happy by Income — {g['year'].max() - 4}–{g['year'].max()}",
+            )
+            fig2.update_traces(texttemplate="%{y:.1f}%", textposition="outside")
+            fig2.update_layout(yaxis_ticksuffix="%", coloraxis_showscale=False, yaxis_range=[0, 70])
+            st.plotly_chart(fig2, width='stretch')
+
+        st.divider()
+
+        # ── Section 2: Happiness by Household Size ────────────────────────────
+        st.subheader("Happiness by Household Size")
+        st.caption(
+            "Household size from GSS `famsize` question: total persons living in the household. "
+            "Controlled for income to separate the family size effect from the wealth effect."
+        )
+
+        if "famsize_grp" in g.columns:
+            fam_all = (
+                g[g["famsize_grp"].notna()]
+                .groupby("famsize_grp", observed=True)["is_very_happy"]
+                .mean()
+                .mul(100)
+                .reset_index()
+                .rename(columns={"is_very_happy": "% Very Happy", "famsize_grp": "Household Size"})
+            )
+            fam_all["Household Size"] = pd.Categorical(
+                fam_all["Household Size"], categories=FAMSIZE_ORDER, ordered=True
+            )
+            fam_all = fam_all.sort_values("Household Size")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                fig3 = px.bar(
+                    fam_all, x="Household Size", y="% Very Happy",
+                    text_auto=".1f",
+                    color="% Very Happy", color_continuous_scale="Blues",
+                    title="% Very Happy by Household Size (All Incomes)",
+                    category_orders={"Household Size": FAMSIZE_ORDER},
+                )
+                fig3.update_traces(texttemplate="%{y:.1f}%", textposition="outside")
+                fig3.update_layout(yaxis_ticksuffix="%", coloraxis_showscale=False, yaxis_range=[0, 60])
+                st.plotly_chart(fig3, width='stretch')
+
+            with col2:
+                # Same chart but split by high vs low income
+                if "income_quintile" in g.columns:
+                    fam_inc = (
+                        g[
+                            g["famsize_grp"].notna() &
+                            g["income_quintile"].isin(["Bottom 20%", "Top 20%"])
+                        ]
+                        .groupby(["famsize_grp", "income_quintile"], observed=True)["is_very_happy"]
+                        .mean()
+                        .mul(100)
+                        .reset_index()
+                        .rename(columns={
+                            "is_very_happy": "% Very Happy",
+                            "famsize_grp": "Household Size",
+                            "income_quintile": "Income",
+                        })
+                    )
+                    fam_inc["Household Size"] = pd.Categorical(
+                        fam_inc["Household Size"], categories=FAMSIZE_ORDER, ordered=True
+                    )
+                    fig4 = px.line(
+                        fam_inc.sort_values("Household Size"),
+                        x="Household Size", y="% Very Happy", color="Income",
+                        markers=True,
+                        title="Household Size Effect: High vs Low Income",
+                        color_discrete_map={"Top 20%": "#2196F3", "Bottom 20%": "#FF5722"},
+                        category_orders={"Household Size": FAMSIZE_ORDER},
+                    )
+                    fig4.update_layout(yaxis_ticksuffix="%", yaxis_range=[0, 70])
+                    st.plotly_chart(fig4, width='stretch')
+
+        st.divider()
+
+        # ── Section 3: America's Mood Over Time ──────────────────────────────
+        st.subheader("America's Mood Over Time")
+        st.caption(
+            "Despite decades of rising real incomes, national happiness levels have remained "
+            "remarkably stable — a well-documented phenomenon known as the Easterlin paradox."
+        )
+
+        mood = (
+            gss[gss["happy"].isin([1, 2, 3])]
+            .groupby(["year", "happy_label"])
+            .size()
+            .reset_index(name="count")
+        )
+        mood_total = mood.groupby("year")["count"].transform("sum")
+        mood["pct"] = mood["count"] / mood_total * 100
+        mood["happy_label"] = pd.Categorical(
+            mood["happy_label"],
+            categories=["Very Happy", "Pretty Happy", "Not Too Happy"],
+            ordered=True,
+        )
+
+        fig5 = px.area(
+            mood.sort_values(["year", "happy_label"]),
+            x="year", y="pct", color="happy_label",
+            title="Distribution of Happiness in America (1972–2022)",
+            labels={"year": "Year", "pct": "% of Respondents", "happy_label": ""},
+            color_discrete_map={
+                "Very Happy": "#4CAF50",
+                "Pretty Happy": "#FFC107",
+                "Not Too Happy": "#F44336",
+            },
+            groupnorm="percent",
+        )
+        fig5.update_layout(yaxis_ticksuffix="%", hovermode="x unified", yaxis_range=[0, 100])
+        st.plotly_chart(fig5, width='stretch')
+
+        # Line chart of just "very happy" to see the signal more clearly
+        very_trend = mood[mood["happy_label"] == "Very Happy"][["year", "pct"]].sort_values("year")
+        fig6 = px.line(
+            very_trend, x="year", y="pct", markers=True,
+            title="% Reporting 'Very Happy' Over Time",
+            labels={"year": "Year", "pct": "% Very Happy"},
+        )
+        fig6.update_layout(yaxis_ticksuffix="%", yaxis_range=[0, 50])
+        st.plotly_chart(fig6, width='stretch')
+
+        st.divider()
+
+        # ── Section 4: Income × Family Size Heatmap ──────────────────────────
+        st.subheader("Income x Household Size — The Combined Picture")
+        st.caption("Does having a larger household matter more if you're rich or poor?")
+
+        if "income_quintile" in g.columns and "famsize_grp" in g.columns:
+            heat = (
+                g[g["income_quintile"].notna() & g["famsize_grp"].notna()]
+                .groupby(["income_quintile", "famsize_grp"], observed=True)["is_very_happy"]
+                .agg(["mean", "count"])
+                .reset_index()
+            )
+            heat.columns = ["Income Quintile", "Household Size", "pct_very_happy", "n"]
+            heat["% Very Happy"] = (heat["pct_very_happy"] * 100).round(1)
+            heat = heat[heat["n"] >= 30]  # suppress cells with sparse data
+
+            heat_pivot = heat.pivot(
+                index="Household Size", columns="Income Quintile", values="% Very Happy"
+            )
+            heat_pivot = heat_pivot.reindex(
+                index=[s for s in FAMSIZE_ORDER if s in heat_pivot.index],
+                columns=[q for q in QUINTILE_ORDER if q in heat_pivot.columns],
+            )
+
+            fig7 = px.imshow(
+                heat_pivot,
+                color_continuous_scale="RdYlGn",
+                zmin=15, zmax=65,
+                text_auto=".1f",
+                title="% Very Happy by Income Quintile and Household Size",
+                labels={"color": "% Very Happy"},
+                aspect="auto",
+            )
+            fig7.update_traces(texttemplate="%{z:.1f}%")
+            fig7.update_layout(coloraxis_colorbar_ticksuffix="%")
+            st.plotly_chart(fig7, width='stretch')
 
 
 if __name__ == "__main__":

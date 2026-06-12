@@ -221,3 +221,4 @@ __marimo__/
 data/raw/
 data/processed/*
 !data/processed/census_clean.parquet
+!data/processed/gss_clean.parquet
